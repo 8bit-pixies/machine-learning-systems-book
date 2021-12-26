@@ -1,0 +1,15 @@
+site_name: Machine Learning Systems Book
+site_description: "Machine Learning Systems - for low resources and low infrastructure setups"
+site_author: "charliec443"
+docs_dir: docs/
+repo_name: "charliec443/machine-learning-systems-book"
+repo_url: "https://github.com/charliec443/machine-learning-systems-book"
+theme:
+  name: "material"
+
+markdown_extensions:
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.snippets
+  - tables
