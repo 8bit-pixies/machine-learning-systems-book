@@ -110,7 +110,115 @@ Should we use this code for production? Personally, a custom transformers which 
 import pandas as pd
 import numpy as np
 
-def bin_mapper(X, bins, columns=None, mapping=None):
+
+def build_config(model):
+    """
+    See reference: https://github.com/interpretml/ebm2onnx/blob/master/ebm2onnx/convert.py
+    """
+    model_config = []
+    model_global = model.explain_global()
+
+    for feature_index in range(len(model.feature_names)):
+        feature_name = model.feature_names[feature_index]
+        feature_type = model.feature_types[feature_index]
+        feature_group = model.feature_groups_[feature_index]
+        info_config = {}
+
+        if feature_type == "continuous":
+            info_config["feature_type"] = feature_type
+            info_config["column_name"] = [feature_name]
+            info_config["column_index"] = [feature_group[0]]
+            info_config["column_mapping"] = (
+                [-np.inf]
+                + list(model.preprocessor_.col_bin_edges_[feature_group[0]])
+                + [np.inf]
+            )
+            info_config["scores"] = model.additive_terms_[feature_index][1:]
+            # print(len(list(pd.IntervalIndex.from_tuples(list(zip(info_config["column_mapping"][0][:-1], info_config["column_mapping"][0][1:]))))),
+            # len(info_config['scores']))
+            info_config["table"] = pd.DataFrame(
+                {
+                    "interval": list(
+                        pd.IntervalIndex.from_tuples(
+                            list(
+                                zip(
+                                    info_config["column_mapping"][0][:-1],
+                                    info_config["column_mapping"][0][1:],
+                                )
+                            )
+                        )
+                    ),
+                    "scores": info_config["scores"],
+                }
+            )
+        elif feature_type == "categorical":
+            info_config["feature_type"] = feature_type
+            info_config["column_name"] = [feature_name]
+            info_config["column_index"] = [feature_group[0]]
+            info_config["column_mapping"] = model.preprocessor_.col_mapping_[
+                feature_group[0]
+            ]
+            info_config["scores"] = model.additive_terms_[feature_index]
+            row_index = list(info_config["column_mapping"].keys())
+            dummy_index = " "
+            while dummy_index in row_index:
+                dummy_index += " "
+            row_index = [dummy_index] + row_index
+            info_config["table"] = pd.DataFrame(
+                {"categories": row_index, "scores": info_config["scores"]}
+            )
+        elif feature_type == "interaction":
+            # left part right part? I think using range is harder to read - maybe.
+            info_config["feature_type"] = [
+                model.feature_types[idx] for idx in feature_group
+            ]
+            info_config["column_name"] = [
+                model.preprocessor_.feature_names[idx] for idx in feature_group
+            ]
+            info_config["column_index"] = list(feature_group)
+
+            if info_config["feature_type"][0] == "continuous":
+                left_mapping = (
+                    [-np.inf]
+                    + model.pair_preprocessor_.col_bin_edges_[feature_group[0]].tolist()
+                    + [np.inf]
+                )
+                row_index = list(
+                    pd.IntervalIndex.from_tuples(
+                        list(zip(left_mapping[:-1], left_mapping[1:]))
+                    )
+                )
+            else:
+                left_mapping = model.preprocessor_.col_mapping_[feature_group[0]]
+                row_index = list(left_mapping.keys())
+            if info_config["feature_type"][1] == "continuous":
+                right_mapping = (
+                    [-np.inf]
+                    + model.pair_preprocessor_.col_bin_edges_[feature_group[1]].tolist()
+                    + [np.inf]
+                )
+                col_index = list(
+                    pd.IntervalIndex.from_tuples(
+                        list(zip(right_mapping[:-1], right_mapping[1:]))
+                    )
+                )
+            else:
+                right_mapping = model.preprocessor_.col_mapping_[feature_group[1]]
+                col_index = list(right_mapping.keys())
+
+            info_config["column_mapping"] = [left_mapping, right_mapping]
+            info_config["scores"] = model_global.data(feature_index)["scores"]
+            info_config["table"] = pd.DataFrame(
+                info_config["scores"], columns=col_index, index=row_index
+            )
+        else:
+            raise ValueError(f"feature type {feature_type} is not supported.")
+
+        model_config.append(info_config)
+    return model_config
+
+
+def bin_mapper(X, config):
     """
     Builds bins in a generic way, a wrapper around pandas cut with some
     extensions - supports table lookups. If mapping is not provided, 
@@ -129,9 +237,17 @@ def bin_mapper(X, bins, columns=None, mapping=None):
     mapping = np.arange(16).reshape(4,4)
     bin_mapper(np.arange(20).reshape(10, 2), bins, columns, mapping)
     """
-    if columns is None:
-        columns = list(range(len(bins)))
     output = []
+    if type(X) is pd.DataFrame:
+        X_ = X[config['column_name']]
+    else:
+        X_ = X[:, config['column_index']]
+    
+    if config['feature_type'] == 'continuous':
+        out_ = pd.cut(X_, config['])
+        
+    elif config['feature_type'] == 'categorical':
+    else:
     for b, c in zip(bins, columns):
         X_ = X[:, c]
         intervals = [-np.inf] + b + [np.inf] 
@@ -148,6 +264,8 @@ def bin_mapper(X, bins, columns=None, mapping=None):
 ```
 
 Despite the short length, it is much more manageable from a production standpoint. Then our code using the EBM can be simplified and decoupled. 
+
+>  TODO: Align with `ebm2onnx/convert.py` to create interfaces
 
 
 ```py
@@ -166,33 +284,21 @@ X_train, X_test, y_train, y_test = train_test_split(
 
 ebm = ExplainableBoostingRegressor(random_state=seed)
 ebm.fit(X_train, y_train)
-ebm_global = ebm.explain_global()
 
-bin_wrapper_config = []
-for nf, nm in enumerate(ebm_global.feature_names):
-    graph_data = ebm_global.data(nf)
+ebm_config = build_config(ebm)
 
-    if " x " not in nm:
-        columns = [int(nm.replace("feature_", ""))-1]
-        bins = [graph_data["names"][1:-1]]
-        mapping = graph_data["scores"]
-    else:
-        columns = [int(x.replace("feature_", ""))-1 for x in nm.split(" x ")]
-        bins = [graph_data['left_names'][1:-1], graph_data['right_names'][1:-1]]
-        mapping = graph_data['scores']
-    bin_wrapper_config.append(
-        dict(
-            columns = columns,
-            bins=bins,
-            mapping=mapping
-        )
-    )
 output = np.hstack([
-    bin_mapper(X_train, **x) for x in bin_wrapper_config
+    bin_mapper(X_train, bins=x['column_mapping'], columns=x['column_index'], mapping=x['scores']) for x in ebm_config
 ])  # shape (None, 20)
+```
+
+
+```py
+
 ```
 
 This approach is easier to work with and does not depend on the interpret library! Furthermore, it can be pickled with relative ease without package management. By using the `mapping` it will generate a 1-D learned embedding in the tabular setting without deep learning.
 
 This approach can also be used to extend categorical variables to have a similar encoding scheme without one-hot encoding. This would transform a categorical column to a learned non-linear representation. This becomes a direct value-mapping problem instead. 
 
+This approach can even be used to determine mappings of interaction variables without exploding the underlying dimensional space without using constructs like "feature cross". The issue with feature cross or the `PolynomialFeatures` creation from `scikit-learn` leads to an exponential increase in variables which makes it difficult to optimise without greedy search to limit the number of features in their model. 

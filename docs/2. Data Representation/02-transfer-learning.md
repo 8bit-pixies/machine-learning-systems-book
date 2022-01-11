@@ -114,4 +114,4 @@ model2.fit(X, y)
 model2.score(X, y)
 ```
 
-Although the performance in both variations is worse than using the built-in k-nearest neighbors classifier, it is an order of magnitude faster on larger datasets. This kind of fine-tuning can 
+Although the performance in both variations is worse than using the built-in k-nearest neighbors classifier, it is an order of magnitude faster on larger datasets. This kind of fine-tuning can be used to build and deploy models in resource constrained settings. 
